@@ -4,7 +4,6 @@ import sys
 import os
 import random
 import re
-import time
 
 from urllib.request import urlopen
 from telethon.sync import TelegramClient
