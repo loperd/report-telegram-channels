@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import sys
 import os
@@ -59,10 +60,10 @@ def hash_remote_file(remote, algorithm="md5"):
     return hash_type.hexdigest()
 
 
-def report_dirty_channel(client, channel, message):
+async def report_dirty_channel(client, channel, message):
     try:
-        result = client(functions.account.ReportPeerRequest(
-            peer=client.get_entity(channel),
+        result = await client(functions.account.ReportPeerRequest(
+            peer=await client.get_entity(channel),
             reason=types.InputReportReasonOther(),
             message=message))
 
@@ -77,47 +78,55 @@ def report_dirty_channel(client, channel, message):
         if res:
             delay = int(res.group(1)) + 10
             print("\nWaiting for {} seconds... Time to get a new api_id/api_hash!\n".format(delay))
-            time.sleep(delay)
+            await asyncio.sleep(delay)
 
 
-def report_dirty_channels(api_id, api_hash):
+async def report_dirty_channels(result_file_path, dirty_channels, client, messages):
+    with open(result_file_path, 'a+') as result_file:
+        result_file.seek(0)
+        result_file_content = result_file.read()
+        for dirty_channel in dirty_channels:
+            dirty_channel = dirty_channel.strip()
+            if dirty_channel in result_file_content:
+                print("Skipped the channel {} because it has already reported it.".format(dirty_channel))
+                continue
+            msg = random.choice(messages).strip()
+            if not await report_dirty_channel(client, dirty_channel, msg):
+                await asyncio.sleep(40 + random.randint(1, 128))
+                continue
+            if len(result_file_content) > 0:
+                result_file.write("\n")
+
+            result_file.write(dirty_channel)
+            result_file.flush()
+
+            await asyncio.sleep(40 + random.randint(1, 128))
+
+
+def create_tg_client():
     session_file_path = 'data/{}/{}'.format(api_id, api_hash)
-    with TelegramClient(session_file_path, api_id, api_hash) as tg_client:
-        with open(result_file_path, 'a+') as result_file:
-            result_file.seek(0)
-            result_file_content = result_file.read()
-            for dirty_channel in dirty_channels:
-                dirty_channel = dirty_channel.strip()
-                if dirty_channel in result_file_content:
-                    print("Skipped the channel {} because it has already reported it.".format(dirty_channel))
-                    continue
-                msg = random.choice(messages).strip()
-                if not report_dirty_channel(tg_client, dirty_channel, msg):
-                    time.sleep(40 + random.randint(1, 128))
-                    continue
-                if len(result_file_content) > 0:
-                    result_file.write("\n")
-
-                result_file.write(dirty_channel)
-                result_file.flush()
-
-                time.sleep(40 + random.randint(1, 128))
+    with TelegramClient(session_file_path, api_id, api_hash) as client:
+        return client
 
 
-if __name__ == '__main__':
-    if len(sys.argv) < 4:
-        print_help()
+async def main():
+    await tg_client.connect()
+
+    if not await tg_client.is_user_authorized():
+        print("Does not login.")
         exit(1)
 
-    app_api_id = int(sys.argv[1])
-    app_api_hash = sys.argv[2]
+    if len(sys.argv) < 4:
+        print("Successfully logged in.")
+        exit(0)
+
     dirty_channels_file_url = sys.argv[3]
 
     messages = get_messages()
 
     result_file_path = os.path.join(
         os.path.dirname(os.path.relpath(__file__)),
-        'data/{}/reported.txt'.format(app_api_id)
+        'data/{}/reported.txt'.format(api_id)
     )
 
     result_file_directory = os.path.dirname(result_file_path)
@@ -127,18 +136,35 @@ if __name__ == '__main__':
     latest_hash_sum = ''
     wait_secs = 30
 
+    while True:
+        dirty_channels = get_dirty_channels(dirty_channels_file_url)
+        new_hash_sum = get_remote_md5_sum(dirty_channels_file_url)
+
+        if new_hash_sum == latest_hash_sum:
+            print("Wait {} seconds for next updates.".format(wait_secs))
+            await asyncio.sleep(wait_secs)
+            continue
+
+        latest_hash_sum = new_hash_sum
+
+        await report_dirty_channels(
+            result_file_path=result_file_path,
+            dirty_channels=dirty_channels,
+            client=tg_client,
+            messages=messages)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) < 3:
+        print_help()
+        exit(1)
+
+    api_id = int(sys.argv[1])
+    api_hash = sys.argv[2]
+
+    tg_client = create_tg_client()
+
     try:
-        while True:
-            dirty_channels = get_dirty_channels(dirty_channels_file_url)
-            new_hash_sum = get_remote_md5_sum(dirty_channels_file_url)
-
-            if new_hash_sum == latest_hash_sum:
-                print("Wait {} seconds for next updates.".format(wait_secs))
-                time.sleep(wait_secs)
-                continue
-
-            latest_hash_sum = new_hash_sum
-
-            report_dirty_channels(api_id=app_api_id, api_hash=app_api_hash)
+        tg_client.loop.run_until_complete(main())
     except KeyboardInterrupt:
         print('Closed..')
